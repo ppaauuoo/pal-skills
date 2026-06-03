@@ -241,6 +241,85 @@ kubectl logs -f deployment/<APP> -n <NAMESPACE> -c <CONTAINER>   # multi-contain
 
 ---
 
+## Step 3 — Write `build_deploy.bat` (if missing)
+
+After confirming the build and deploy config, check whether `build_deploy.bat` exists at the project root:
+
+```bat
+if exist build_deploy.bat goto :skip
+```
+
+If it does **not** exist, inspect the project to fill in the template variables:
+
+| Variable | Where to find it |
+|----------|------------------|
+| `REGISTRY` | Ask the user, or infer from existing manifests / CI config |
+| `IMAGE` | Dockerfile name, service folder name, or project name |
+| `TAG` | `package.json` version, `pyproject.toml` version, or `latest` |
+| `DOCKERFILE` | Path to `Dockerfile` relative to project root |
+| `BUILD_CONTEXT` | Usually `.`; use service subfolder for monorepos |
+| `SECRET_NAME` | Name used in K8s `secretRef`; default `<IMAGE>-secrets` |
+| `NAMESPACE` | K8s namespace from existing manifests, or `default` |
+| `MANIFEST` | Path to deployment YAML (e.g. `k8s/deployment.yaml`) |
+| `APP` | Deployment name from the manifest |
+
+Then **write** `build_deploy.bat` at the project root:
+
+```bat
+@echo off
+setlocal
+cd /d "%~dp0"
+
+:: ── configure ────────────────────────────────────────────────────────────────
+set REGISTRY=<REGISTRY>
+set IMAGE=<IMAGE>
+set TAG=<TAG>
+set DOCKERFILE=Dockerfile
+set BUILD_CONTEXT=.
+set SECRET_NAME=<SECRET_NAME>
+set NAMESPACE=<NAMESPACE>
+set MANIFEST=<MANIFEST>
+set APP=<APP>
+:: ─────────────────────────────────────────────────────────────────────────────
+
+echo [1/4] Logging in to registry ...
+docker login %REGISTRY%
+if errorlevel 1 ( echo [ERROR] docker login failed. & pause & exit /b 1 )
+
+echo [2/4] Building image ...
+docker build -f %DOCKERFILE% -t %REGISTRY%/%IMAGE%:%TAG% %BUILD_CONTEXT%
+if errorlevel 1 ( echo [ERROR] docker build failed. & pause & exit /b 1 )
+
+echo [3/4] Pushing image ...
+docker push %REGISTRY%/%IMAGE%:%TAG%
+if errorlevel 1 ( echo [ERROR] docker push failed. & pause & exit /b 1 )
+
+echo [4/4] Deploying to Kubernetes ...
+
+if exist .env (
+    echo   Upserting secrets from .env ...
+    kubectl create secret generic %SECRET_NAME% ^
+        --from-env-file=.env ^
+        -n %NAMESPACE% ^
+        --dry-run=client -o yaml | kubectl apply -f -
+    if errorlevel 1 ( echo [ERROR] Secret upsert failed. & pause & exit /b 1 )
+)
+
+kubectl apply -f %MANIFEST%
+if errorlevel 1 ( echo [ERROR] kubectl apply failed. & pause & exit /b 1 )
+
+echo.
+echo [OK] Deployed %REGISTRY%/%IMAGE%:%TAG% → %NAMESPACE%/%APP%
+echo.
+kubectl get pods -n %NAMESPACE%
+pause
+endlocal
+```
+
+> **Multi-service projects:** duplicate the build/push block for each service, each with its own `IMAGE`, `TAG`, `DOCKERFILE`, and `BUILD_CONTEXT` variables.
+
+---
+
 ## Full Release Checklist
 
 ```

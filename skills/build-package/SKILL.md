@@ -1,11 +1,11 @@
 ---
 name: build-package
-description: Build a Python app into a Windows EXE with PyInstaller then package it into a Windows installer with Inno Setup. Use when user says "build the package", "build installer", "package the app", "create setup exe", or asks to produce a distributable Windows installer from a Python project.
+description: Build a Python app into a Windows EXE with PyInstaller then package it into a Windows installer with Inno Setup, then smoke-test the EXE and installer. Use when user says "build the package", "build installer", "package the app", "create setup exe", or asks to produce a distributable Windows installer from a Python project.
 ---
 
 # build-package
 
-Two-step Windows packaging pipeline: PyInstaller → EXE, Inno Setup → installer.
+Three-step Windows packaging pipeline: PyInstaller → EXE, Inno Setup → installer, smoke test → verified.
 
 ## Prerequisites
 
@@ -126,6 +126,73 @@ iscc installer.iss
 
 Output: path defined in `installer.iss`, typically `installer\<AppName>_Setup.exe`.
 
+### Step 3 — Test the Package
+
+After both build steps succeed, run the smoke tests below **in order**. Stop and report on first failure.
+
+#### 3a — EXE smoke test
+
+Launch the EXE and verify it stays alive for at least 3 seconds (catches immediate crashes, missing DLLs, import errors).
+
+```bat
+REM For --windowed builds: launch, wait 3 s, check process is still running
+start "" /B "dist\%NAME%\%NAME%.exe"
+timeout /t 3 /nobreak >nul
+tasklist /FI "IMAGENAME eq %NAME%.exe" 2>nul | find /I "%NAME%.exe" >nul
+if errorlevel 1 (
+    echo [FAIL] EXE exited within 3 seconds — likely a startup crash.
+    exit /b 1
+)
+echo [OK] EXE still running after 3 s — killing test process.
+taskkill /F /IM "%NAME%.exe" >nul 2>&1
+```
+
+For **console apps** (`--console` / no `--windowed`), check the exit code directly instead:
+
+```bat
+"dist\%NAME%\%NAME%.exe" --version
+if errorlevel 1 ( echo [FAIL] EXE --version returned non-zero. & exit /b 1 )
+echo [OK] EXE --version passed.
+```
+
+If the app has no `--version` flag, use `--help` or any flag that exits 0 quickly.
+
+#### 3b — Installer silent-install test
+
+Install silently to a temp directory and verify the EXE lands where expected.
+
+```bat
+set TESTDIR=%TEMP%\%NAME%_test_install
+if exist "%TESTDIR%" rmdir /s /q "%TESTDIR%"
+
+"installer\%NAME%_Setup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="%TESTDIR%"
+if errorlevel 1 ( echo [FAIL] Installer exited with error. & exit /b 1 )
+
+if not exist "%TESTDIR%\%NAME%.exe" (
+    echo [FAIL] Installed EXE not found at %TESTDIR%\%NAME%.exe
+    exit /b 1
+)
+echo [OK] Installer placed EXE at %TESTDIR%\%NAME%.exe
+
+REM Clean up
+rmdir /s /q "%TESTDIR%"
+```
+
+#### 3c — Installed EXE re-launch check (optional but recommended)
+
+Reuse the same launch-and-wait pattern against the **installed** copy:
+
+```bat
+start "" /B "%TESTDIR%\%NAME%.exe"
+timeout /t 3 /nobreak >nul
+tasklist /FI "IMAGENAME eq %NAME%.exe" 2>nul | find /I "%NAME%.exe" >nul
+if errorlevel 1 ( echo [FAIL] Installed EXE crashed on launch. & exit /b 1 )
+taskkill /F /IM "%NAME%.exe" >nul 2>&1
+echo [OK] Installed EXE smoke-test passed.
+```
+
+---
+
 ## Outputs
 
 | Path | Description |
@@ -152,6 +219,9 @@ if exist "dist\%NAME%" rmdir /s /q "dist\%NAME%"
 | Build succeeds but EXE crashes silently | Drop `--windowed` temporarily to see console errors |
 | `dist` too large | Add `--exclude-module` for unused heavy deps (torch, scipy, etc.) |
 | Resources not found at runtime | Check `--add-data` paths; use `sys._MEIPASS` in code for one-file mode |
+| EXE exits in <3 s during smoke test | Run without `--windowed` to capture traceback; fix missing imports/data |
+| Installer test: `/VERYSILENT` hangs | UAC prompt needs elevation — run test from an elevated shell |
+| Installed EXE not found at expected path | Check `DefaultDirName` in `installer.iss`; adjust `TESTDIR` to match |
 
 ## `build_package.bat` template
 
@@ -181,7 +251,21 @@ echo [2/2] Packaging installer ...
 %ISCC% installer.iss
 if errorlevel 1 ( echo [ERROR] Inno Setup failed. & pause & exit /b 1 )
 
-echo [OK] installer\%NAME%_Setup.exe
+echo [3/3] Smoke testing ...
+start "" /B "dist\%NAME%\%NAME%.exe"
+timeout /t 3 /nobreak >nul
+tasklist /FI "IMAGENAME eq %NAME%.exe" 2>nul | find /I "%NAME%.exe" >nul
+if errorlevel 1 ( echo [ERROR] EXE crashed on launch. & pause & exit /b 1 )
+taskkill /F /IM "%NAME%.exe" >nul 2>&1
+
+set TESTDIR=%TEMP%\%NAME%_test_install
+if exist "%TESTDIR%" rmdir /s /q "%TESTDIR%"
+"installer\%NAME%_Setup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="%TESTDIR%"
+if errorlevel 1 ( echo [ERROR] Installer failed. & pause & exit /b 1 )
+if not exist "%TESTDIR%\%NAME%.exe" ( echo [ERROR] Installed EXE not found. & pause & exit /b 1 )
+rmdir /s /q "%TESTDIR%"
+
+echo [OK] installer\%NAME%_Setup.exe — all tests passed.
 pause
 endlocal
 ```

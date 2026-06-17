@@ -80,6 +80,115 @@ After writing, confirm the path: `installer.iss` created.
 
 ---
 
+### Step 0.5 — Write `build_package.bat` (if missing)
+
+Check whether `build_package.bat` exists in the project root. If not, write it now.
+This bat is the single command a developer runs for all future releases — edit only
+the three variables at the top when bumping a version.
+
+Fill in the variables by inspecting the project (same sources as Step 0):
+
+| Variable | Where to find it |
+|---|---|
+| `NAME` | `AppName` from `installer.iss` / PyInstaller `--name` |
+| `VERSION` | `pyproject.toml` `[project] version` |
+| `ISCC` | Run `where iscc`; if not on PATH check `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe` |
+
+**Detect onefile vs onedir** by checking whether the `.spec` has a `COLLECT` step or whether `installer.iss` `[Files]` sources `dist\<Name>.exe` (onefile) vs `dist\<Name>\*` (onedir). Choose the correct `del` vs `rmdir` clean command and the correct EXE path.
+
+Write `build_package.bat` using this template, filled with the project values:
+
+```bat
+@echo off
+setlocal
+cd /d "%~dp0"
+
+REM ── Edit these three lines when bumping a version ─────────────────────────
+set NAME=<AppName>
+set VERSION=<AppVersion>
+set ISCC=<full path to ISCC.exe, or just: iscc>
+REM ─────────────────────────────────────────────────────────────────────────
+
+set INSTALLER=installer\%NAME%_Setup_v%VERSION%.exe
+set TESTDIR=%TEMP%\%NAME%_test_install
+
+echo ========================================
+echo  %NAME% v%VERSION% — Build Pipeline
+echo ========================================
+echo.
+
+REM ── 1/3  PyInstaller ──────────────────────────────────────────────────────
+echo [1/3] Building EXE ...
+
+REM onefile: del dist\<Name>.exe    |   onedir: rmdir /s /q dist\<Name>
+<clean command>
+
+REM If a .spec file exists, use it; otherwise use flags directly:
+uv run pyinstaller <Name>.spec --noconfirm
+REM  — OR for a fresh onedir build without a spec:
+REM uv run pyinstaller --noconfirm --clean --name "%NAME%" --onedir --windowed --paths src src\main.py
+
+if errorlevel 1 ( echo [ERROR] PyInstaller failed. & pause & exit /b 1 )
+echo [OK] EXE built.
+echo.
+
+REM ── 2/3  Inno Setup ───────────────────────────────────────────────────────
+echo [2/3] Packaging installer ...
+"%ISCC%" installer.iss
+if errorlevel 1 ( echo [ERROR] Inno Setup failed. & pause & exit /b 1 )
+if not exist "%INSTALLER%" ( echo [ERROR] %INSTALLER% not found. & pause & exit /b 1 )
+echo [OK] %INSTALLER%
+echo.
+
+REM ── 3/3  Smoke tests ──────────────────────────────────────────────────────
+REM NOTE: Do NOT use "powershell -Command ^" here. cmd's ^ line-continuation
+REM does not strip ^ inside a double-quoted string, so PowerShell receives
+REM the literal ^ tokens and fails with "term '^' is not recognized".
+REM Use pure cmd builtins (start, timeout, tasklist, taskkill) instead.
+
+echo [3/3] Smoke-testing EXE (must stay alive 5 s) ...
+start "" /B "dist\%NAME%\%NAME%.exe"
+timeout /t 5 /nobreak >nul
+tasklist /FI "IMAGENAME eq %NAME%.exe" 2>nul | find /I "%NAME%.exe" >nul
+if errorlevel 1 ( echo [ERROR] EXE exited within 5 s -- startup crash. & pause & exit /b 1 )
+taskkill /F /IM "%NAME%.exe" >nul 2>&1
+echo [OK] EXE alive after 5 s.
+echo.
+
+echo [3/3] Smoke-testing installer (silent install) ...
+if exist "%TESTDIR%" rmdir /s /q "%TESTDIR%"
+"%INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="%TESTDIR%"
+if errorlevel 1 ( echo [ERROR] Installer returned non-zero. & pause & exit /b 1 )
+if not exist "%TESTDIR%\%NAME%.exe" ( echo [ERROR] Installed EXE not found. & pause & exit /b 1 )
+echo [OK] Installed EXE found.
+
+REM Optional: run uninstaller to clean up registry after test
+if exist "%TESTDIR%\unins000.exe" (
+  "%TESTDIR%\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+  timeout /t 3 /nobreak >nul
+)
+if exist "%TESTDIR%" rmdir /s /q "%TESTDIR%"
+
+REM ── Summary ───────────────────────────────────────────────────────────────
+echo.
+echo ========================================
+echo  BUILD COMPLETE
+echo ========================================
+for %%F in ("%INSTALLER%") do echo  Deliverable: %%~fF  (%%~zF bytes)
+echo.
+pause
+endlocal
+```
+
+After writing, confirm the path: `build_package.bat` created.
+
+> **Version bump checklist** — when releasing a new version, update these three files:
+> 1. `pyproject.toml` — `version = "x.y.z"`
+> 2. `installer.iss` — `AppVersion` and `OutputBaseFilename`
+> 3. `build_package.bat` — `set VERSION=x.y.z`
+
+---
+
 ### Step 1 — Build EXE with PyInstaller
 
 ```bat
@@ -221,51 +330,15 @@ if exist "dist\%NAME%" rmdir /s /q "dist\%NAME%"
 | Resources not found at runtime | Check `--add-data` paths; use `sys._MEIPASS` in code for one-file mode |
 | EXE exits in <3 s during smoke test | Run without `--windowed` to capture traceback; fix missing imports/data |
 | Installer test: `/VERYSILENT` hangs | UAC prompt needs elevation — run test from an elevated shell |
+| `^ : The term '^' is not recognized` in smoke test | Never use `powershell -Command ^` multi-line in a `.bat` — `^` inside a quoted string is passed literally to PowerShell. Use `start`/`timeout`/`tasklist`/`taskkill` (pure cmd) instead. |
 | Installed EXE not found at expected path | Check `DefaultDirName` in `installer.iss`; adjust `TESTDIR` to match |
 
-## `build_package.bat` template
+## Version bump checklist
 
-Drop this in the project root and edit the three variables at the top:
+For every release, update these three files before running `build_package.bat`:
 
-```bat
-@echo off
-setlocal
-cd /d "%~dp0"
-
-set NAME=MyApp
-set ENTRY=src\main.py
-set ISCC=iscc
-
-if exist "dist\%NAME%" rmdir /s /q "dist\%NAME%"
-
-echo [1/2] Building EXE ...
-uv run --extra dev pyinstaller ^
-    --noconfirm --clean ^
-    --name "%NAME%" ^
-    --onedir --windowed ^
-    --paths "src" ^
-    "%ENTRY%"
-if errorlevel 1 ( echo [ERROR] PyInstaller failed. & pause & exit /b 1 )
-
-echo [2/2] Packaging installer ...
-%ISCC% installer.iss
-if errorlevel 1 ( echo [ERROR] Inno Setup failed. & pause & exit /b 1 )
-
-echo [3/3] Smoke testing ...
-start "" /B "dist\%NAME%\%NAME%.exe"
-timeout /t 3 /nobreak >nul
-tasklist /FI "IMAGENAME eq %NAME%.exe" 2>nul | find /I "%NAME%.exe" >nul
-if errorlevel 1 ( echo [ERROR] EXE crashed on launch. & pause & exit /b 1 )
-taskkill /F /IM "%NAME%.exe" >nul 2>&1
-
-set TESTDIR=%TEMP%\%NAME%_test_install
-if exist "%TESTDIR%" rmdir /s /q "%TESTDIR%"
-"installer\%NAME%_Setup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="%TESTDIR%"
-if errorlevel 1 ( echo [ERROR] Installer failed. & pause & exit /b 1 )
-if not exist "%TESTDIR%\%NAME%.exe" ( echo [ERROR] Installed EXE not found. & pause & exit /b 1 )
-rmdir /s /q "%TESTDIR%"
-
-echo [OK] installer\%NAME%_Setup.exe — all tests passed.
-pause
-endlocal
-```
+| File | Field |
+|---|---|
+| `pyproject.toml` | `version = "x.y.z"` |
+| `installer.iss` | `AppVersion` and `OutputBaseFilename` |
+| `build_package.bat` | `set VERSION=x.y.z` |

@@ -40,6 +40,13 @@ If it does **not** exist, inspect the project to fill in the template variables:
 | `ExeName` | `<AppName>.exe` (matches `--name` passed to PyInstaller) |
 | `IconFile` | Any `.ico` found under `assets/`, `resources/`, or project root; omit line if none |
 
+**MANDATORY — Ask the user these questions before writing `installer.iss`:**
+
+1. **Install directory**: What should the default install path be? (e.g. `{autopf}\<AppName>`, `C:\CVAD`, a custom path)
+2. **Can the user change the install path?** If yes, add `DisableDirPage=no` to always show the directory picker — even on reinstalls.
+
+Always include `DisableDirPage=no` unless the user explicitly says to lock the path.
+
 Then **write** `installer.iss` using the canonical template:
 
 ```iss
@@ -50,7 +57,8 @@ AppVersion=<AppVersion>
 AppPublisher=<AppPublisher>
 AppPublisherURL=<AppURL>
 AppSupportURL=<AppURL>
-DefaultDirName={autopf}\<AppName>
+DefaultDirName=<DefaultDir>           ; ask user for this value
+DisableDirPage=no                      ; always show dir picker so user can change path
 DefaultGroupName=<AppName>
 OutputDir=installer
 OutputBaseFilename=<AppName>_Setup

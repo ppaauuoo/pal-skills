@@ -217,6 +217,27 @@ spec:
       targetPort: <PORT>
 ```
 
+### Verify kubectl context (MANDATORY)
+
+Before any `kubectl apply`, **always ask the user which cluster context to use**.
+Run `kubectl config get-contexts` to list available contexts, then present them
+as options via `ask_user_question`. Never assume the current context is correct.
+
+```bash
+# List available contexts
+kubectl config get-contexts
+
+# Switch to user-chosen context
+kubectl config use-context <CHOSEN_CONTEXT>
+
+# Confirm
+kubectl config current-context
+```
+
+If the project has a deploy script with a `REQUIRED_CONTEXT` variable, still
+confirm with the user — the variable documents intent but the active context
+may have drifted.
+
 ### Post-deploy verification
 
 ```bash

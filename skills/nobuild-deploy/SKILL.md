@@ -126,26 +126,41 @@ Verify all pyproject.toml deps appear in uv.lock.
 
 Check for:
 - ✅ Copies Python from uv cache to `python/`
-- ✅ Runs `uv sync` (to resolve lockfile)
 - ✅ Exports requirements: `uv export --no-hashes --frozen --no-header --no-annotate`
 - ✅ Installs to lib/: `uv pip install --python ... --target lib/ -r _requirements.txt`
 - ✅ Cleans lib/ before install (`rmdir /S /Q lib`)
-- ✅ 7z includes `lib` and `python/`, excludes `.venv` and `.uv_cache`
+- ✅ Bundles MSVC runtime DLLs (msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll)
+- ✅ Deletes old zip before creating new one (prevents stale files persisting)
+- ✅ Error handling with `if %errorLevel% neq 0` after each critical step
+- ✅ 7z includes `lib` and `python/`, excludes `.venv`, `.uv_cache`, `uv.exe`
 - ❌ ISSUE if excludes `*.dist-info` from 7z (breaks package discovery in lib/)
 - ❌ ISSUE if still uses `.venv` in the zip (old pattern, not needed)
+- ❌ ISSUE if 7z updates existing archive instead of creating fresh (stale files persist)
+- ❌ ISSUE if `copy` targets end with `\` (creates `nul` file on Windows instead of suppressing output)
 
 ### Step 8 — Audit run.bat
 
 Check for:
 - ✅ Sets `PYTHONPATH=%~dp0lib`
+- ✅ Sets `PATH=%~dp0lib\<native_pkg>\libs;%PATH%` for packages with native DLLs
 - ✅ Calls bundled `python.exe` directly (no uv at runtime)
 - ✅ Uses `-Xutf8` flag
+- ✅ Pre-flight checks: validates python/ and lib/ exist before launching
+- ✅ No `pause` (hangs nssm service if Python exits)
 - ❌ ISSUE if uses `uv run` (old pattern — uv not needed on prod)
 - ❌ ISSUE if references `.venv` (old pattern — no venv on prod)
+- ❌ ISSUE if has `pause` at end (blocks nssm from detecting crashes)
+- ❌ ISSUE if native DLL directories not on PATH (DLL load failures)
 
 ### Step 9 — Audit install.bat / uninstall.bat
 
-Check for admin elevation, nssm commands, log paths.
+Check for:
+- ✅ Admin elevation check
+- ✅ Creates `logs/` directory before nssm binds stdout/stderr
+- ✅ Smoke test (import critical native modules) before starting service
+- ✅ Actionable error messages on failure
+- ❌ ISSUE if no `mkdir logs` before nssm log binding (silent log loss)
+- ❌ ISSUE if no smoke test (DLL failures only discovered after service starts)
 
 ### Step 10 — Summary
 
@@ -169,30 +184,75 @@ if exist "%DST%" (
 ) else (
     echo [..] Copying %PYTHON_VER% from uv cache...
     xcopy /E /I /Q "%SRC%" "%DST%"
+    if %errorLevel% neq 0 (
+        echo [FAIL] Could not copy Python from uv cache.
+        pause & exit /b 1
+    )
     echo [OK] Done.
 )
 
-:: Sync to resolve lockfile
-echo [..] Syncing dependencies...
-"%~dp0uv.exe" sync
-echo [OK] Lockfile resolved.
+:: Export locked requirements and install to flat lib/
+echo [..] Exporting locked requirements...
+"%~dp0uv.exe" export --no-hashes --frozen --no-header --no-annotate > "%~dp0_requirements.txt"
+if %errorLevel% neq 0 (
+    echo [FAIL] uv export failed. Is uv.lock present?
+    pause & exit /b 1
+)
 
-:: Install to flat lib/ directory
 echo [..] Installing packages to lib/ ...
 if exist "%~dp0lib" rmdir /S /Q "%~dp0lib"
-"%~dp0uv.exe" export --no-hashes --frozen --no-header --no-annotate > "%~dp0_requirements.txt"
 "%~dp0uv.exe" pip install --python "%DST%\python.exe" --target "%~dp0lib" -r "%~dp0_requirements.txt"
+if %errorLevel% neq 0 (
+    echo [FAIL] pip install --target failed.
+    pause & exit /b 1
+)
 del "%~dp0_requirements.txt"
 echo [OK] lib/ ready.
 
-:: Archive
+:: Bundle MSVC runtime DLLs (prod machines may not have VC++ Redistributable)
+:: Use explicit target filenames — never end with \ (creates a 'nul' file on Windows)
+echo [..] Bundling MSVC runtime...
+copy /Y "%SystemRoot%\System32\msvcp140.dll" "%~dp0lib\<NATIVE_PKG>\libs\msvcp140.dll" >nul 2>&1
+copy /Y "%SystemRoot%\System32\vcruntime140.dll" "%~dp0lib\<NATIVE_PKG>\libs\vcruntime140.dll" >nul 2>&1
+copy /Y "%SystemRoot%\System32\vcruntime140_1.dll" "%~dp0lib\<NATIVE_PKG>\libs\vcruntime140_1.dll" >nul 2>&1
+copy /Y "%SystemRoot%\System32\vcomp140.dll" "%~dp0lib\<NATIVE_PKG>\libs\vcomp140.dll" >nul 2>&1
+echo [OK] MSVC runtime bundled.
+
+:: Bundle Universal CRT forwarder DLLs (needed on older Windows builds)
+echo [..] Bundling UCRT forwarders...
+for %%f in ("%SystemRoot%\System32\downlevel\api-ms-win-crt-*.dll") do copy /Y "%%f" "%~dp0lib\<NATIVE_PKG>\libs\%%~nxf" >nul 2>&1
+echo [OK] UCRT forwarders bundled.
+
+:: Co-locate native pkg DLLs alongside .pyd so Windows finds them without PATH tricks
+echo [..] Co-locating DLLs...
+copy /Y "%~dp0lib\<NATIVE_PKG>\libs\*.dll" "%~dp0lib\<NATIVE_PKG>\base\" >nul 2>&1
+echo [OK] DLLs co-located.
+
+:: Archive (always delete old zip first — 7z update mode keeps stale files)
 echo [..] Zipping...
 pushd "%~dp0"
+if exist "..\<PROJECT_NAME>.7z" del "..\<PROJECT_NAME>.7z"
 7z a -mx=1 "..\<PROJECT_NAME>.7z" * lib .python-version ^
     -xr!"__pycache__" -xr!".git" -xr!"*.pyc" ^
-    -xr!".venv" -xr!".uv_cache" -xr!"tests"
+    -x!"predicted_data" -x!"data" ^
+    -xr!".venv" -xr!".uv_cache" -xr!"uv.exe" -x!"tests"
+if %errorLevel% neq 0 (
+    echo [FAIL] 7z packaging failed.
+    popd & pause & exit /b 1
+)
 popd
 echo [OK] <PROJECT_NAME>.7z ready.
+
+:: Quick import validation directly from lib/
+echo [..] Validating imports...
+set PYTHONPATH=%~dp0lib
+set PATH=%~dp0lib\<NATIVE_PKG>\libs;%PATH%
+"%DST%\python.exe" -Xutf8 -c "import <critical_modules>; print('[OK] All imports passed')"
+if %errorLevel% neq 0 (
+    echo [FAIL] Import validation failed. Fix before deploying.
+    pause & exit /b 1
+)
+echo [OK] Validation passed. Safe to deploy.
 pause
 ```
 
@@ -202,9 +262,23 @@ pause
 @echo off
 set ENV=prod
 set PYTHONPATH=%~dp0lib
+set PATH=%~dp0lib\<NATIVE_PKG>\libs;%PATH%
+
+:: Pre-flight checks
+if not exist "%~dp0python\<PYTHON_VER>\python.exe" (
+    echo [FATAL] python/ not found. Re-extract the deployment zip. >&2
+    exit /b 1
+)
+if not exist "%~dp0lib\<CANARY_PKG>" (
+    echo [FATAL] lib/ missing or incomplete. Re-extract the deployment zip. >&2
+    exit /b 1
+)
+
 "%~dp0python\<PYTHON_VER>\python.exe" -Xutf8 ./src/main.py
-pause
 ```
+
+> **No `pause`** — nssm manages the process lifecycle. `pause` would hang the
+> service after a crash, making it appear alive while doing nothing.
 
 ### install.bat
 
@@ -224,9 +298,25 @@ if %errorLevel% neq 0 (
 
 %NSSM_EXE% install %SERVICE_NAME% %LAUNCHER_BAT%
 %NSSM_EXE% set %SERVICE_NAME% AppDirectory %PROJECT_DIR%
+
+:: Ensure logs directory exists before binding stdout/stderr
+if not exist "%PROJECT_DIR%logs" mkdir "%PROJECT_DIR%logs"
 %NSSM_EXE% set %SERVICE_NAME% AppStdout "%PROJECT_DIR%logs\service_out.log"
 %NSSM_EXE% set %SERVICE_NAME% AppStderr "%PROJECT_DIR%logs\service_err.log"
 echo [OK] Service installed.
+
+:: Smoke test before starting — catches missing DLLs/modules at install time
+echo [..] Running import smoke test...
+cd /d "%PROJECT_DIR%"
+set PYTHONPATH=%PROJECT_DIR%lib
+set PATH=%PROJECT_DIR%lib\<NATIVE_PKG>\libs;%PATH%
+"%PROJECT_DIR%python\<PYTHON_VER>\python.exe" -Xutf8 -c "import <critical_modules>; print('[OK] All critical imports passed')"
+if %errorLevel% neq 0 (
+    echo [FAIL] Smoke test failed. Check missing DLLs or incomplete lib/.
+    echo        Try installing Visual C++ Redistributable 2015-2022.
+    pause
+    exit /b 1
+)
 
 %NSSM_EXE% start %SERVICE_NAME%
 ```
@@ -272,11 +362,11 @@ Dev machine (internet)         Prod machine (offline)
 | Include | Exclude |
 |---------|---------|
 | `python/` (interpreter) | `.venv/` |
-| `lib/` (all packages) | `.uv_cache/` |
+| `lib/` (all packages + MSVC DLLs) | `.uv_cache/` |
 | `src/` (app code) | `.git/` |
-| `nssm.exe`, `uv.exe` | `__pycache__/`, `*.pyc` |
-| `run.bat`, `install.bat`, `uninstall.bat` | `tests/` |
-| `.env.template`, `pyproject.toml` | |
+| `nssm.exe` | `uv.exe` (dev-only, ~40MB) |
+| `run.bat`, `install.bat`, `uninstall.bat` | `__pycache__/`, `*.pyc` |
+| `.env.template`, `pyproject.toml` | `tests/` |
 
 ---
 
@@ -296,9 +386,19 @@ lib/
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `No module named X` | `lib/` missing or incomplete | Re-run `prepare.bat`, redeploy |
+| `DLL load failed` | Missing MSVC runtime on prod | Bundle msvcp140/vcruntime140 DLLs in prepare.bat |
+| `DLL load failed` (native pkg) | DLL directory not on PATH | Add `set PATH=%~dp0lib\<pkg>\libs;%PATH%` to run.bat |
+| Service appears running but does nothing | `pause` in run.bat blocking after crash | Remove `pause` from run.bat |
 | Service won't start | Wrong path in nssm | `nssm edit <ServiceName>` |
+| Stale files in zip after rebuild | 7z update mode keeps old files | Delete old .7z before `7z a` |
+| `-xr!"data"` strips `lib/skimage/data/` | `-xr!` is recursive, hits package subfolders | Use `-x!"data"` for top-level project folders |
+| `*.pyi` exclusion breaks scikit-image | skimage uses `.pyi` stubs at runtime via lazy_loader | Never exclude `*.pyi` from zip |
+| CWD-relative paths fail as service | `'../..'` depends on CWD; nssm sets CWD to AppDirectory | Use `os.path.dirname(os.path.abspath(__file__))` |
+| `nul` file created in lib/ | `copy /Y ... "path\"` with trailing backslash | Use explicit target filename |
 | Import errors after upgrade | Stale `lib/` from old deploy | `prepare.bat` always does clean `rmdir /S /Q lib` |
 | Python not found | `python/` not in zip | Check `prepare.bat` xcopy step |
+| No logs written on crash | `logs/` dir doesn't exist | Add `mkdir logs` in install.bat before nssm binding |
+| Smoke test fails after elevation | CWD changed to System32 | Add `cd /d "%PROJECT_DIR%"` before smoke test |
 | `.venv` keeps breaking | You're on the old pattern | Switch to lib/ pattern (this skill) |
 
 ---
@@ -313,3 +413,25 @@ The old pattern (`uv run --no-sync` with a bundled `.venv`) breaks when:
 
 The `lib/` pattern has zero moving parts: it's just files on disk. Python reads
 them via `PYTHONPATH`. Nothing to resolve, nothing to invalidate, works forever.
+
+---
+
+## Known Pitfalls (Hard-Won)
+
+1. **MSVC runtime not on prod machines.** Offline Windows machines often lack VC++ Redistributable. Bundle `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` from System32 into the native package's libs/ directory.
+
+2. **`copy /Y "src" "dir\"` creates a `nul` file.** On Windows, `>nul` after a `copy` whose target ends with `\` can create a literal file named `nul`. Always use explicit target filenames: `copy /Y "src" "dir\filename.dll"`.
+
+3. **7z update mode keeps deleted files.** If you re-run `7z a` on an existing archive, files removed from disk persist in the archive. Always `del` the old .7z before creating.
+
+4. **`pause` hangs nssm services.** If the Python process crashes, `pause` blocks waiting for a keypress that will never come. nssm sees the cmd.exe as alive. Never use `pause` in service entry scripts.
+
+5. **Admin elevation changes CWD to System32.** After `Start-Process -Verb RunAs`, the working directory becomes `C:\Windows\System32`. Always `cd /d "%~dp0"` or use absolute paths after elevation.
+
+6. **Native packages need DLL directories on PATH.** Packages like PaddlePaddle put .pyd files in one directory and their dependency DLLs in a sibling `libs/` directory. Python's DLL loader doesn't find them without `set PATH=...;%PATH%`.
+
+7. **`*.dist-info` exclusion breaks metadata.** Many packages use `importlib.metadata` for version discovery or plugin loading. Don't exclude dist-info from the zip.
+
+9. **`-xr!"data"`** vs **`-x!"data"`** — `-xr!` excludes recursively (hits `lib/skimage/data/`, `lib/paddle/dataset/`, etc.). Use `-x!` for top-level project folders you want to exclude without affecting packages inside `lib/`.
+
+10. **CWD-relative paths in application code break as a service.** If app code uses relative paths like `'../..'` to find credentials or config, those paths depend on CWD. When nssm runs the service, CWD is `AppDirectory` (project root). Fix: resolve paths relative to `__file__` using `os.path.dirname(os.path.abspath(__file__))` — never relative to CWD.

@@ -63,20 +63,40 @@ EXPOSE 3000
 CMD ["npm", "start"]
 ```
 
-**Python (generic)**
+**Python (pip / requirements.txt)**
 ```dockerfile
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-FROM python:3.12-slim
+FROM python:3.13-slim
 WORKDIR /app
 COPY --from=builder /app .
 EXPOSE 8000
 CMD ["python", "-m", "<module>"]
 ```
+
+**Python (uv — preferred when pyproject.toml + uv.lock exist)**
+```dockerfile
+FROM python:3.13-slim-bookworm
+WORKDIR /app
+
+# Single static binary — no pip install needed
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+COPY . .
+
+EXPOSE 8000
+CMD ["uv", "run", "python", "-m", "<module>"]
+```
+
+> **Why `COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv`?**
+> Pulls the pre-built uv binary from the official OCI image in one layer —
+> no curl, no pip, no install scripts. Fast, reproducible, cache-friendly.
 
 **Go**
 ```dockerfile

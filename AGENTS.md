@@ -1,5 +1,7 @@
 ## MANDATORY (obey always, no exceptions)
 
+0. **English only — always.** Every single response 100% in English. No Chinese, Thai, or any other language unless the user explicitly asks for translation. Never default to non-English prose.
+
 1. **When a user request is vague, ambiguous, or confusing — ask before acting.** Use `ask_user_question` to clarify intent. Do not guess and implement the wrong thing. One focused question beats a wrong diff.
    - If there is **any doubt** about scope, target, or intent: state your interpretation in one sentence, then ask via `ask_user_question` with options like "Yes, proceed with this interpretation" vs "Let me clarify".
    - **Never silently assume** — surface the assumption and confirm it. Skip only when the intent is unambiguously clear from context.
